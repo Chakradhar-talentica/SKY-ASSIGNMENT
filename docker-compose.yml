@@ -1,0 +1,127 @@
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: skyhigh-postgres
+    environment:
+      POSTGRES_USER: skyhigh
+      POSTGRES_PASSWORD: skyhigh123
+      POSTGRES_DB: skyhigh_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skyhigh -d skyhigh_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - skyhigh-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: skyhigh-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - skyhigh-network
+
+  # FastAPI Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skyhigh-app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://skyhigh:skyhigh123@postgres:5432/skyhigh_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - APP_ENV=development
+      - DEBUG=true
+      - SEAT_HOLD_DURATION_SECONDS=120
+      - MAX_BAGGAGE_WEIGHT_KG=25
+      - EXCESS_BAGGAGE_FEE_PER_KG=10
+      - RATE_LIMIT_ENABLED=true
+      - CACHE_TTL_SECONDS=30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - skyhigh-network
+    volumes:
+      - .:/app
+    command: >
+      sh -c "
+        alembic upgrade head &&
+        uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skyhigh-celery-worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://skyhigh:skyhigh123@postgres:5432/skyhigh_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - skyhigh-network
+    volumes:
+      - .:/app
+    command: celery -A src.workers.celery_app worker --loglevel=info
+
+  # Celery Beat (Scheduler)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skyhigh-celery-beat
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://skyhigh:skyhigh123@postgres:5432/skyhigh_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    networks:
+      - skyhigh-network
+    volumes:
+      - .:/app
+    command: celery -A src.workers.celery_app beat --loglevel=info
+
+networks:
+  skyhigh-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
